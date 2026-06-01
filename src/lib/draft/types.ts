@@ -15,7 +15,21 @@ export type DraftOrderMode = "random" | "manual";
 /** How teams are allocated across participants. */
 export type AllocationMode = "all" | "fixed";
 
+/**
+ * How squads are filled:
+ *  - "draft"   → classic serpentine/standard pick draft (engine.ts).
+ *  - "auction" → managers bid credits to buy nations (auction.ts).
+ *  - "hybrid"  → top "marquee" nations are auctioned, the rest snake-drafted.
+ */
+export type DraftStyle = "draft" | "auction" | "hybrid";
+
 export interface DraftSettings {
+  /** Draft style; "draft" is the classic pick draft. */
+  style: DraftStyle;
+  /** Credits each manager gets in auction / hybrid styles. */
+  budget: number;
+  /** Hybrid only: how many top-ranked nations go to auction before the draft fills the rest. */
+  marqueeCount: number;
   format: DraftFormat;
   /** Seconds on the clock per pick. */
   pickSeconds: number;

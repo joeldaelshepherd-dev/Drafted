@@ -21,6 +21,9 @@ export const DEMO_PARTICIPANTS: DraftParticipant[] = [
 ];
 
 export const DEMO_SETTINGS: DraftSettings = {
+  style: "draft",
+  budget: 200,
+  marqueeCount: 8,
   format: "snake",
   pickSeconds: 60,
   allocationMode: "fixed",
