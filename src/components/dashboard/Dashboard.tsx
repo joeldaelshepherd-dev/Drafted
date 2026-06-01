@@ -139,10 +139,15 @@ export function Dashboard({
           <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">Your teams</h2>
           <div className="flex flex-wrap gap-2">
             {teams.map((t) => (
-              <span key={t.id} className="pill flex items-center gap-2 bg-white/[0.04]">
+              <Link
+                key={t.id}
+                href={`/teams/${t.id}`}
+                className="pill tap flex items-center gap-2 bg-white/[0.04] hover:bg-white/[0.08]"
+              >
                 <Flag url={flagUrlFor(t)} code={t.shortCode} size="sm" />
                 {t.name}
-              </span>
+                <span className="text-ink-faint">→</span>
+              </Link>
             ))}
           </div>
         </section>
