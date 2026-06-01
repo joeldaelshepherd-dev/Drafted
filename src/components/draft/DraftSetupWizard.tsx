@@ -5,16 +5,23 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Card } from "@/components/ui";
 import { usePools } from "@/lib/pools/store";
-import { useDraftConfig, DEFAULT_DRAFT_SETTINGS } from "@/lib/draft/config-store";
+import { DEFAULT_DRAFT_SETTINGS } from "@/lib/draft/config-store";
+import {
+  saveDraftSettings,
+  setDraftStatus,
+  useDraftRecord,
+} from "@/lib/draft/drafts-store";
 import { WC2026_TEAMS } from "@/lib/data/wc2026";
 import type {
-  AllocationMode,
   DraftFormat,
   DraftOrderMode,
   DraftSettings,
   DraftStyle,
+  SquadMode,
+  SubsequentFormat,
 } from "@/lib/draft/types";
 import { cn } from "@/lib/utils";
+import { ManualOrderEditor } from "./ManualOrderEditor";
 
 const TOTAL_TEAMS = WC2026_TEAMS.length; // 48
 
@@ -27,6 +34,46 @@ const CLOCK_OPTIONS: { secs: number; label: string }[] = [
 ];
 
 const BUDGET_OPTIONS = [100, 150, 200, 300, 500];
+
+/** Nations on the board / auction block. Decoupled from squad size. */
+const BOARD_OPTIONS: { size: number; label: string }[] = [
+  { size: TOTAL_TEAMS, label: "All 48" },
+  { size: 24, label: "Top 2 / group" },
+  { size: 20, label: "Top 20" },
+  { size: 15, label: "Top 15" },
+  { size: 10, label: "Top 10" },
+];
+
+/** The five first-class styles the wizard opens on (Step 1 folds in old Format). */
+type StyleKey = "snake" | "standard" | "balanced" | "auction" | "hybrid";
+
+const STYLE_OPTIONS: { key: StyleKey; title: string; desc: string }[] = [
+  {
+    key: "snake",
+    title: "Snake draft",
+    desc: "Managers take turns; the order reverses each round (1→8, then 8→1). Fairest pick draft — the crowd favourite.",
+  },
+  {
+    key: "standard",
+    title: "Standard draft",
+    desc: "Same pick order every round (1→8, 1→8…). Simple and predictable, but pick #1 keeps the edge.",
+  },
+  {
+    key: "balanced",
+    title: "Balanced random",
+    desc: "A fresh random order every single round, so early and late luck even out over the draft.",
+  },
+  {
+    key: "auction",
+    title: "Auction",
+    desc: "Every nation goes under the hammer. Managers nominate and bid credits — deepest pockets land the favourites.",
+  },
+  {
+    key: "hybrid",
+    title: "Hybrid auction",
+    desc: "Bid for the marquee nations only; the rest of each squad fills automatically via a fair free draft.",
+  },
+];
 
 type ToggleKey =
   | "autoPick"
@@ -49,12 +96,20 @@ const TOGGLES: { key: ToggleKey; label: string; hint: string }[] = [
   { key: "pushNotifications", label: "Push reminders", hint: "Nudge managers when they're on the clock." },
 ];
 
-/** Labelled steps for a style — Format is draft-only; Budget is auction/hybrid-only. */
+/** Auction/Hybrid gain an extra "Auction" step (budget + bid timer + marquee). */
 function stepsFor(style: DraftStyle): string[] {
   if (style === "auction" || style === "hybrid") {
-    return ["Style", "Clock", "Squads", "Budget", "Order", "Experience", "Launch"];
+    return ["Style", "Clock", "Squads", "Auction", "Order", "Experience", "Launch"];
   }
-  return ["Style", "Format", "Clock", "Squads", "Order", "Experience", "Launch"];
+  return ["Style", "Clock", "Squads", "Order", "Experience", "Launch"];
+}
+
+function styleKeyOf(form: DraftSettings): StyleKey {
+  if (form.style === "auction") return "auction";
+  if (form.style === "hybrid") return "hybrid";
+  if (form.format === "standard") return "standard";
+  if (form.format === "balanced-random") return "balanced";
+  return "snake";
 }
 
 function StepDots({ steps, step }: { steps: string[]; step: number }) {
@@ -111,6 +166,48 @@ function OptionCard({
   );
 }
 
+function Stepper({
+  value,
+  min,
+  max,
+  onChange,
+  suffix,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (n: number) => void;
+  suffix?: string;
+}) {
+  const clamped = Math.max(min, Math.min(value, max));
+  return (
+    <div className="flex items-center gap-3">
+      <Button
+        variant="secondary"
+        size="sm"
+        className="h-9 w-9 justify-center p-0 text-lg"
+        onClick={() => onChange(Math.max(min, clamped - 1))}
+        disabled={clamped <= min}
+      >
+        −
+      </Button>
+      <span className="w-14 text-center font-display text-2xl font-black tabular-nums text-brand">
+        {clamped}
+        {suffix ? <span className="text-sm text-ink-faint">{suffix}</span> : null}
+      </span>
+      <Button
+        variant="secondary"
+        size="sm"
+        className="h-9 w-9 justify-center p-0 text-lg"
+        onClick={() => onChange(Math.min(max, clamped + 1))}
+        disabled={clamped >= max}
+      >
+        +
+      </Button>
+    </div>
+  );
+}
+
 function ToggleRow({
   on,
   label,
@@ -149,55 +246,59 @@ function ToggleRow({
   );
 }
 
-export function DraftSetupWizard({ poolId }: { poolId: string }) {
+export function DraftSetupWizard({ poolId, draftId }: { poolId: string; draftId: string }) {
   const router = useRouter();
   const { pools, loading: poolsLoading, startDraft } = usePools();
-  const { settings: saved, loading: configLoading, saveSettings } = useDraftConfig(poolId);
+  const { draft, loading: draftLoading } = useDraftRecord(draftId);
 
   const pool = pools.find((p) => p.id === poolId);
-  const loading = poolsLoading || configLoading;
+  const loading = poolsLoading || draftLoading;
 
   const [form, setForm] = useState<DraftSettings>(DEFAULT_DRAFT_SETTINGS);
   const [hydrated, setHydrated] = useState(false);
   const [step, setStep] = useState(0);
   const [launchCount, setLaunchCount] = useState<number | null>(null);
 
-  // Hydrate the form from any previously-saved settings, once.
+  // Hydrate the form from the draft record's saved settings, once.
   useEffect(() => {
-    if (!configLoading && !hydrated) {
-      if (saved) setForm(saved);
+    if (!draftLoading && !hydrated) {
+      if (draft) setForm({ ...DEFAULT_DRAFT_SETTINGS, ...draft.settings });
       setHydrated(true);
     }
-  }, [configLoading, saved, hydrated]);
+  }, [draftLoading, draft, hydrated]);
 
   const steps = stepsFor(form.style);
   const stepName = steps[Math.min(step, steps.length - 1)];
   const isAuction = form.style === "auction" || form.style === "hybrid";
+  const styleKey = styleKeyOf(form);
 
   const members = pool?.members.length ?? 0;
-  const maxPerUser = Math.max(1, Math.min(8, Math.floor(TOTAL_TEAMS / Math.max(1, members))));
+  const board = Math.max(1, Math.min(form.boardSize || TOTAL_TEAMS, TOTAL_TEAMS));
+  // A fixed squad can't exceed what the board can supply across all managers.
+  const maxPerUser = Math.max(1, Math.floor(board / Math.max(1, members)));
 
   const rounds = useMemo(() => {
-    if (form.allocationMode === "fixed") {
+    if (form.squadMode === "fixed") {
       return Math.max(1, Math.min(form.teamsPerUser, maxPerUser));
     }
-    return Math.max(1, Math.floor(TOTAL_TEAMS / Math.max(1, members)));
-  }, [form.allocationMode, form.teamsPerUser, maxPerUser, members]);
+    return Math.max(1, Math.floor(board / Math.max(1, members)));
+  }, [form.squadMode, form.teamsPerUser, maxPerUser, board, members]);
 
   const totalPicks = rounds * members;
-  const maxMarquee = Math.max(1, Math.min(TOTAL_TEAMS, rounds * Math.max(1, members)));
+  const maxMarquee = Math.max(1, board);
 
-  // Launch countdown → persist, flip pool to in-progress, enter the lobby.
+  // Launch countdown → flip status, flip the coarse pool flag, enter the room.
   useEffect(() => {
     if (launchCount === null || !pool) return;
     if (launchCount <= 0) {
+      setDraftStatus(draftId, "in_progress");
       startDraft(pool.id);
-      router.push(`/pools/${pool.id}/draft`);
+      router.push(`/pools/${pool.id}/draft/${draftId}`);
       return;
     }
     const id = setTimeout(() => setLaunchCount((n) => (n === null ? null : n - 1)), 850);
     return () => clearTimeout(id);
-  }, [launchCount, pool, router, startDraft]);
+  }, [launchCount, pool, router, startDraft, draftId]);
 
   if (loading) {
     return (
@@ -233,7 +334,7 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
           <h1 className="text-3xl font-black text-ink">Admins only</h1>
           <p className="mt-2 text-sm text-ink-muted">
             Only the pool admin can set up the draft. Hang tight — you&apos;ll be pulled into the
-            lobby the moment they launch it.
+            room the moment they launch it.
           </p>
         </div>
         <Link href={`/pools/${pool.id}`}>
@@ -248,19 +349,44 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
   const set = <K extends keyof DraftSettings>(key: K, value: DraftSettings[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
+  const selectStyle = (key: StyleKey) =>
+    setForm((f) => {
+      switch (key) {
+        case "snake":
+          return { ...f, style: "draft" as DraftStyle, format: "snake" as DraftFormat };
+        case "standard":
+          return { ...f, style: "draft" as DraftStyle, format: "standard" as DraftFormat };
+        case "balanced":
+          return { ...f, style: "draft" as DraftStyle, format: "balanced-random" as DraftFormat };
+        case "auction":
+          return { ...f, style: "auction" as DraftStyle };
+        case "hybrid":
+          return { ...f, style: "hybrid" as DraftStyle };
+        default:
+          return f;
+      }
+    });
+
   const clockLabel =
     CLOCK_OPTIONS.find((c) => c.secs === form.pickSeconds)?.label ?? `${form.pickSeconds}s`;
 
-  const styleLabel =
-    form.style === "auction" ? "Auction" : form.style === "hybrid" ? "Hybrid auction" : "Draft";
+  const styleLabel = STYLE_OPTIONS.find((s) => s.key === styleKey)?.title ?? "Draft";
+  const boardLabel = BOARD_OPTIONS.find((b) => b.size === board)?.label ?? `Top ${board}`;
+  const squadLabel =
+    form.squadMode === "fixed"
+      ? `${rounds} nations each`
+      : form.squadMode === "split-top"
+        ? `Split the top ${board} (${rounds} each)`
+        : `Split ${board} nations (${rounds} each)`;
 
   const beginLaunch = () => {
     const finalForm: DraftSettings = {
       ...form,
-      teamsPerUser: form.allocationMode === "fixed" ? rounds : form.teamsPerUser,
+      boardSize: board,
+      teamsPerUser: form.squadMode === "fixed" ? rounds : form.teamsPerUser,
       marqueeCount: Math.max(1, Math.min(form.marqueeCount, maxMarquee)),
     };
-    saveSettings(finalForm);
+    saveDraftSettings(draftId, finalForm);
     setLaunchCount(3);
   };
 
@@ -279,7 +405,7 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
           <p className="text-[11px] font-bold uppercase tracking-wide text-ink-faint">
             Step {step + 1} of {steps.length} · {stepName}
           </p>
-          <h1 className="text-3xl font-black text-ink">Set up the draft</h1>
+          <h1 className="text-3xl font-black text-ink">{draft?.name ?? "Set up the draft"}</h1>
         </div>
         <StepDots steps={steps} step={step} />
       </div>
@@ -290,49 +416,19 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
           <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
             How do managers land their nations?
           </h2>
-          <OptionCard
-            active={form.style === "draft"}
-            title="Snake / standard draft"
-            desc="Managers take turns picking nations from the board. Classic, simple, and quick to run."
-            onClick={() => set("style", "draft" as DraftStyle)}
-          />
-          <OptionCard
-            active={form.style === "auction"}
-            title="Auction"
-            desc="Every nation goes under the hammer. Managers nominate and bid credits — the deepest pockets land the favourites."
-            onClick={() => set("style", "auction" as DraftStyle)}
-          />
-          <OptionCard
-            active={form.style === "hybrid"}
-            title="Hybrid auction"
-            desc="Bid for the marquee nations only; the rest of each squad is filled automatically by a fair needs-based draft."
-            onClick={() => set("style", "hybrid" as DraftStyle)}
-          />
+          {STYLE_OPTIONS.map((opt) => (
+            <OptionCard
+              key={opt.key}
+              active={styleKey === opt.key}
+              title={opt.title}
+              desc={opt.desc}
+              onClick={() => selectStyle(opt.key)}
+            />
+          ))}
         </section>
       )}
 
-      {/* Format (draft only) */}
-      {stepName === "Format" && (
-        <section className="flex flex-col gap-3">
-          <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
-            How does the order run?
-          </h2>
-          <OptionCard
-            active={form.format === "snake"}
-            title="Snake draft"
-            desc="The order reverses each round (1→8, then 8→1). Fairer — whoever picks last gets first dibs next round. The crowd favourite."
-            onClick={() => set("format", "snake" as DraftFormat)}
-          />
-          <OptionCard
-            active={form.format === "standard"}
-            title="Standard draft"
-            desc="Same order every round (1→8, 1→8…). Simple and predictable, but pick #1 keeps the edge."
-            onClick={() => set("format", "standard" as DraftFormat)}
-          />
-        </section>
-      )}
-
-      {/* Clock */}
+      {/* Clock (unified for all styles) */}
       {stepName === "Clock" && (
         <section className="flex flex-col gap-3">
           <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
@@ -365,148 +461,186 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
           </div>
           <p className="text-[11px] text-ink-faint">
             {isAuction
-              ? "Bidding stays open for a short window that resets on every fresh bid, so a hot lot keeps running until the room goes quiet."
+              ? "This is the nomination clock. The live bid window (and its anti-snipe extend) is set on the next step."
               : "Auto-pick (if on) fills the slot the moment the clock hits zero, so no one ever stalls the draft."}
           </p>
         </section>
       )}
 
-      {/* Squads */}
+      {/* Squads — squad size AND nations-on-the-block, fully decoupled */}
       {stepName === "Squads" && (
-        <section className="flex flex-col gap-3">
-          <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
-            How many nations per manager?
-          </h2>
-          <OptionCard
-            active={form.allocationMode === "fixed"}
-            title="Set squad size"
-            desc="Every manager ends up with the same fixed number of nations."
-            onClick={() => set("allocationMode", "fixed" as AllocationMode)}
-          />
-          {form.allocationMode === "fixed" && (
-            <Card className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm font-bold text-ink">Nations each</p>
-                <p className="text-[11px] text-ink-faint">Up to {maxPerUser} with {members} managers.</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-9 w-9 justify-center p-0 text-lg"
-                  onClick={() =>
-                    set("teamsPerUser", Math.max(1, Math.min(form.teamsPerUser, maxPerUser) - 1))
-                  }
-                  disabled={Math.min(form.teamsPerUser, maxPerUser) <= 1}
-                >
-                  −
-                </Button>
-                <span className="w-8 text-center font-display text-2xl font-black tabular-nums text-brand">
-                  {Math.min(form.teamsPerUser, maxPerUser)}
-                </span>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-9 w-9 justify-center p-0 text-lg"
-                  onClick={() =>
-                    set("teamsPerUser", Math.min(maxPerUser, Math.min(form.teamsPerUser, maxPerUser) + 1))
-                  }
-                  disabled={Math.min(form.teamsPerUser, maxPerUser) >= maxPerUser}
-                >
-                  +
-                </Button>
-              </div>
-            </Card>
-          )}
-          <OptionCard
-            active={form.allocationMode === "all"}
-            title="Split every nation"
-            desc={`Share all ${TOTAL_TEAMS} nations out as evenly as possible — about ${Math.max(
-              1,
-              Math.floor(TOTAL_TEAMS / Math.max(1, members)),
-            )} each with ${members} managers.`}
-            onClick={() => set("allocationMode", "all" as AllocationMode)}
-          />
+        <section className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3">
+            <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
+              How big is each squad?
+            </h2>
+            <OptionCard
+              active={form.squadMode === "fixed"}
+              title="Set squad size"
+              desc="Every manager ends up with the same fixed number of nations."
+              onClick={() => set("squadMode", "fixed" as SquadMode)}
+            />
+            {form.squadMode === "fixed" && (
+              <Card className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-bold text-ink">Nations each</p>
+                  <p className="text-[11px] text-ink-faint">
+                    Up to {maxPerUser} with {members} {members === 1 ? "manager" : "managers"} on a{" "}
+                    {board}-nation board.
+                  </p>
+                </div>
+                <Stepper
+                  value={Math.min(form.teamsPerUser, maxPerUser)}
+                  min={1}
+                  max={maxPerUser}
+                  onChange={(n) => set("teamsPerUser", n)}
+                />
+              </Card>
+            )}
+            <OptionCard
+              active={form.squadMode === "split-all"}
+              title="Split every nation"
+              desc="Share the whole board out as evenly as possible — every nation gets an owner."
+              onClick={() => set("squadMode", "split-all" as SquadMode)}
+            />
+            <OptionCard
+              active={form.squadMode === "split-top"}
+              title="Split the top nations only"
+              desc="Only the best nations on the board are in play, shared out evenly. Tighter, higher-quality squads."
+              onClick={() => set("squadMode", "split-top" as SquadMode)}
+            />
+          </div>
+
+          <div className="flex flex-col gap-3">
+            <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
+              Nations on the {isAuction ? "block" : "board"}
+            </h2>
+            <div className="grid grid-cols-3 gap-2">
+              {BOARD_OPTIONS.map((b) => {
+                const active = board === b.size;
+                return (
+                  <button
+                    key={b.size}
+                    type="button"
+                    onClick={() => set("boardSize", b.size)}
+                    className={cn(
+                      "tap flex flex-col items-center gap-0.5 rounded-2xl border py-3 transition-colors",
+                      active
+                        ? "border-brand bg-brand/10"
+                        : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]",
+                    )}
+                  >
+                    <span className="font-display text-2xl font-black tabular-nums text-ink">
+                      {b.size}
+                    </span>
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-ink-faint">
+                      {b.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-ink-faint">
+              This sets how many nations are in play — completely separate from squad size.
+            </p>
+          </div>
+
           <p className="rounded-xl bg-white/[0.03] px-3 py-2 text-xs text-ink-muted">
             That&apos;s <span className="font-bold text-ink">{rounds}</span>{" "}
             {rounds === 1 ? "round" : "rounds"} ·{" "}
-            <span className="font-bold text-ink">{totalPicks}</span> total nations across{" "}
+            <span className="font-bold text-ink">{totalPicks}</span> nations drafted across{" "}
             {members} {members === 1 ? "manager" : "managers"}.
           </p>
         </section>
       )}
 
-      {/* Budget (auction / hybrid only) */}
-      {stepName === "Budget" && (
-        <section className="flex flex-col gap-3">
-          <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
-            Credits each manager starts with
-          </h2>
-          <div className="grid grid-cols-3 gap-2">
-            {BUDGET_OPTIONS.map((b) => {
-              const active = form.budget === b;
-              return (
-                <button
-                  key={b}
-                  type="button"
-                  onClick={() => set("budget", b)}
-                  className={cn(
-                    "tap flex flex-col items-center gap-0.5 rounded-2xl border py-3 transition-colors",
-                    active
-                      ? "border-brand bg-brand/10"
-                      : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]",
-                  )}
-                >
-                  <span className="font-display text-2xl font-black tabular-nums text-gold">{b}</span>
-                  <span className="text-[10px] font-bold uppercase tracking-wide text-ink-faint">
-                    credits
-                  </span>
-                </button>
-              );
-            })}
+      {/* Auction (auction / hybrid only) — budget + bid timer + marquee */}
+      {stepName === "Auction" && (
+        <section className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3">
+            <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
+              Credits each manager starts with
+            </h2>
+            <div className="grid grid-cols-3 gap-2">
+              {BUDGET_OPTIONS.map((b) => {
+                const active = form.budget === b;
+                return (
+                  <button
+                    key={b}
+                    type="button"
+                    onClick={() => set("budget", b)}
+                    className={cn(
+                      "tap flex flex-col items-center gap-0.5 rounded-2xl border py-3 transition-colors",
+                      active
+                        ? "border-brand bg-brand/10"
+                        : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]",
+                    )}
+                  >
+                    <span className="font-display text-2xl font-black tabular-nums text-gold">
+                      {b}
+                    </span>
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-ink-faint">
+                      credits
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
+
+          <Card className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-ink">Bid clock</p>
+              <p className="text-[11px] text-ink-faint">
+                Seconds the live bidding stays open on each lot.
+              </p>
+            </div>
+            <Stepper
+              value={form.bidSeconds}
+              min={5}
+              max={60}
+              onChange={(n) => set("bidSeconds", n)}
+              suffix="s"
+            />
+          </Card>
+
+          <Card className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-bold text-ink">Anti-snipe extend</p>
+              <p className="text-[11px] text-ink-faint">
+                A late bid pushes the clock back to this, so no one steals a lot at the buzzer.
+              </p>
+            </div>
+            <Stepper
+              value={form.bidExtendSeconds}
+              min={0}
+              max={30}
+              onChange={(n) => set("bidExtendSeconds", n)}
+              suffix="s"
+            />
+          </Card>
+
           {form.style === "hybrid" && (
             <Card className="flex items-center justify-between gap-4">
               <div>
-                <p className="text-sm font-bold text-ink">Nations on the block</p>
+                <p className="text-sm font-bold text-ink">Nations auctioned</p>
                 <p className="text-[11px] text-ink-faint">
-                  The top {Math.max(1, Math.min(form.marqueeCount, maxMarquee))} ranked nations go to
-                  auction; the rest fill automatically.
+                  The top {Math.max(1, Math.min(form.marqueeCount, maxMarquee))} go to auction; the
+                  rest fill via a free draft.
                 </p>
               </div>
-              <div className="flex items-center gap-3">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-9 w-9 justify-center p-0 text-lg"
-                  onClick={() =>
-                    set("marqueeCount", Math.max(1, Math.min(form.marqueeCount, maxMarquee) - 1))
-                  }
-                  disabled={Math.min(form.marqueeCount, maxMarquee) <= 1}
-                >
-                  −
-                </Button>
-                <span className="w-8 text-center font-display text-2xl font-black tabular-nums text-brand">
-                  {Math.max(1, Math.min(form.marqueeCount, maxMarquee))}
-                </span>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-9 w-9 justify-center p-0 text-lg"
-                  onClick={() =>
-                    set("marqueeCount", Math.min(maxMarquee, Math.min(form.marqueeCount, maxMarquee) + 1))
-                  }
-                  disabled={Math.min(form.marqueeCount, maxMarquee) >= maxMarquee}
-                >
-                  +
-                </Button>
-              </div>
+              <Stepper
+                value={Math.min(form.marqueeCount, maxMarquee)}
+                min={1}
+                max={maxMarquee}
+                onChange={(n) => set("marqueeCount", n)}
+              />
             </Card>
           )}
+
           <p className="text-[11px] text-ink-faint">
-            {form.style === "hybrid"
-              ? "Spend freely on the marquee nations — any credits left over don't carry into the fill draft."
-              : "Hold one credit in reserve for every slot you still need, so you can always complete a full squad."}
+            Opening bids start at 10% of the budget, with a 5% minimum raise. Unsold nations are
+            re-offered once, then handed out free at the end so every squad is complete.
           </p>
         </section>
       )}
@@ -525,10 +659,19 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
           />
           <OptionCard
             active={form.orderMode === "manual"}
-            title="Join order"
-            desc="Managers go in the order they joined the pool. Predictable, and you stay in control."
+            title="Set the order by hand"
+            desc="Arrange the managers yourself for round 1, then choose how the later rounds run."
             onClick={() => set("orderMode", "manual" as DraftOrderMode)}
           />
+          {form.orderMode === "manual" && pool && (
+            <ManualOrderEditor
+              members={pool.members.map((m) => ({ id: m.id, name: m.name }))}
+              value={form.manualFirstRoundOrder ?? pool.members.map((m) => m.id)}
+              onChange={(ids) => set("manualFirstRoundOrder", ids)}
+              subsequentFormat={form.subsequentFormat}
+              onSubsequentChange={(f: SubsequentFormat) => set("subsequentFormat", f)}
+            />
+          )}
         </section>
       )}
 
@@ -565,23 +708,30 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
                 ...(isAuction
                   ? ([
                       ["Credits each", `${form.budget}`],
-                      ...(form.style === "hybrid"
-                        ? ([["On the block", `Top ${Math.max(1, Math.min(form.marqueeCount, maxMarquee))} nations`]] as [string, string][])
-                        : []),
                       ["Nominate clock", `${form.pickSeconds}s · ${clockLabel}`],
+                      [
+                        "Bid clock",
+                        `${form.bidSeconds}s · +${form.bidExtendSeconds}s anti-snipe`,
+                      ],
+                      ...(form.style === "hybrid"
+                        ? ([
+                            [
+                              "Auctioned",
+                              `Top ${Math.max(1, Math.min(form.marqueeCount, maxMarquee))} nations`,
+                            ],
+                          ] as [string, string][])
+                        : []),
                     ] as [string, string][])
-                  : ([
-                      ["Format", form.format === "snake" ? "Snake draft" : "Standard draft"],
-                      ["Pick clock", `${form.pickSeconds}s · ${clockLabel}`],
-                    ] as [string, string][])),
-                [
-                  "Squads",
-                  form.allocationMode === "fixed"
-                    ? `${rounds} nations each`
-                    : `All ${TOTAL_TEAMS} split (${rounds} each)`,
-                ],
+                  : ([["Pick clock", `${form.pickSeconds}s · ${clockLabel}`]] as [string, string][])),
+                ["On the block", `${boardLabel} (${board})`],
+                ["Squads", squadLabel],
                 ["Total nations", `${totalPicks} across ${members} managers`],
-                ["Order", form.orderMode === "random" ? "Random shuffle" : "Join order"],
+                [
+                  "Order",
+                  form.orderMode === "random"
+                    ? "Random shuffle"
+                    : `Manual · then ${form.subsequentFormat}`,
+                ],
               ].map(([k, v]) => (
                 <div key={k} className="flex items-center justify-between gap-3 py-2">
                   <dt className="text-ink-muted">{k}</dt>
@@ -590,7 +740,7 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
               ))}
             </dl>
             <p className="text-[11px] text-ink-faint">
-              Launching opens the pre-draft lobby for{" "}
+              Launching opens the room for{" "}
               <span className="font-bold text-ink">{pool.name}</span>. Everyone gathers there, then
               you kick off the live {isAuction ? "auction" : "draft"} when the crew is ready.
             </p>
@@ -615,11 +765,7 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
             Continue
           </Button>
         ) : (
-          <Button
-            variant="secondary"
-            className="w-full justify-center"
-            onClick={() => setStep(0)}
-          >
+          <Button variant="secondary" className="w-full justify-center" onClick={() => setStep(0)}>
             Start over
           </Button>
         )}
@@ -638,7 +784,7 @@ export function DraftSetupWizard({ poolId }: { poolId: string }) {
             >
               {launchCount === 0 ? "GO" : launchCount}
             </span>
-            <p className="text-sm text-ink-muted">Opening the lobby for {pool.name}…</p>
+            <p className="text-sm text-ink-muted">Opening the room for {pool.name}…</p>
           </div>
         </div>
       )}

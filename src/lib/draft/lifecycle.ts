@@ -4,22 +4,58 @@
  * here we only set/clear `deadlineAt`.
  */
 import type {
-  AllocationMode,
   DraftParticipant,
   DraftSettings,
   DraftState,
+  SquadMode,
+  SubsequentFormat,
 } from "./types";
 import { generateOrder, shuffleOrder } from "./order";
 
-/** Rounds (teams per participant) for an allocation strategy. */
+/** Resolve the active squad-sizing mode, tolerating legacy (pre-migration) configs. */
+function squadModeOf(settings: DraftSettings): SquadMode {
+  return settings.squadMode ?? (settings.allocationMode === "fixed" ? "fixed" : "split-all");
+}
+
+/**
+ * Rounds (nations per participant).
+ *  - "fixed"     → exactly `teamsPerUser` each.
+ *  - "split-all" / "split-top" → divide the board (`boardSize`, NOT `teamsPerUser`)
+ *    evenly. `boardSize` is fully decoupled from squad size.
+ */
 export function roundsFor(
   settings: DraftSettings,
   participantCount: number,
   poolTeamCount: number,
 ): number {
-  if (settings.allocationMode === "fixed") return Math.max(1, settings.teamsPerUser);
-  // "all" → distribute every team as evenly as possible.
-  return Math.max(1, Math.floor(poolTeamCount / Math.max(1, participantCount)));
+  if (squadModeOf(settings) === "fixed") return Math.max(1, settings.teamsPerUser);
+  const board = Math.min(settings.boardSize || poolTeamCount, poolTeamCount);
+  return Math.max(1, Math.floor(board / Math.max(1, participantCount)));
+}
+
+/**
+ * Build the flat overall-pick order for a manual round-1 lineup. Round 1 is the
+ * exact hand-picked order; rounds 2+ follow `subsequent`:
+ *  - "snake"    → reverse on alternate rounds.
+ *  - "standard" → repeat the same order.
+ *  - "random"   → reshuffle the lane each round (round 1 still the manual order).
+ * `rng` is only used by "random"; call client-side only (Math.random default).
+ */
+function buildManualOrder(
+  firstRound: string[],
+  rounds: number,
+  subsequent: SubsequentFormat,
+  rng: () => number = Math.random,
+): string[] {
+  const order: string[] = [...firstRound];
+  for (let round = 1; round < rounds; round++) {
+    let lane: string[];
+    if (subsequent === "snake") lane = round % 2 === 1 ? [...firstRound].reverse() : firstRound;
+    else if (subsequent === "random") lane = shuffleOrder(firstRound, rng);
+    else lane = firstRound; // standard
+    order.push(...lane);
+  }
+  return order;
 }
 
 export interface CreateDraftArgs {
@@ -35,17 +71,21 @@ export interface CreateDraftArgs {
 export function createDraft(args: CreateDraftArgs): DraftState {
   const { settings, participants, poolTeamCount } = args;
   const baseIds = participants.map((p) => p.userId);
-  const firstRound =
-    settings.orderMode === "random"
-      ? args.orderSeed ?? shuffleOrder(baseIds, args.rng)
-      : baseIds;
+  const isManual = settings.orderMode === "manual";
+  const firstRound = isManual
+    ? settings.manualFirstRoundOrder ?? baseIds
+    : args.orderSeed ?? shuffleOrder(baseIds, args.rng);
   const rounds = roundsFor(settings, participants.length, poolTeamCount);
+
+  const order = isManual
+    ? buildManualOrder(firstRound, rounds, settings.subsequentFormat, args.rng)
+    : generateOrder(firstRound, rounds, settings.format, args.rng);
 
   return {
     settings,
     participants,
     rounds,
-    order: generateOrder(firstRound, rounds, settings.format),
+    order,
     picks: [],
     currentPickIndex: 0,
     status: "lobby",

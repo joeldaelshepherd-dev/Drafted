@@ -15,7 +15,15 @@
 import type { RankingProvider } from "@/lib/fifa/types";
 import { roundsFor } from "./lifecycle";
 import { shuffleOrder } from "./order";
-import type { DraftParticipant, DraftPick, DraftSettings, DraftState, DraftStyle } from "./types";
+import {
+  MIN_BID_PCT,
+  RAISE_STEP_PCT,
+  type DraftParticipant,
+  type DraftPick,
+  type DraftSettings,
+  type DraftState,
+  type DraftStyle,
+} from "./types";
 
 export type AuctionStatus =
   | "lobby"
@@ -30,9 +38,9 @@ export interface AuctionLot {
   teamId: string;
   /** Who put it up for auction. */
   nominatedBy: string;
-  /** Current leading bid (credits). */
+  /** Current leading bid (credits); 0 until the first bid lands. */
   highBid: number;
-  /** userId of the current leader. */
+  /** userId of the current leader, or "" while the lot has no bids yet. */
   highBidder: string;
 }
 
@@ -53,6 +61,7 @@ export type AuctionLogKind =
   | "nominate"
   | "bid"
   | "sold"
+  | "recycle"
   | "fill"
   | "paused"
   | "resumed"
@@ -79,6 +88,8 @@ export interface AuctionState {
   boardTeamIds: string[];
   /** Nations still up for auction (hybrid = remaining marquee nations). */
   lotPool: string[];
+  /** Teams already re-offered once after drawing no bids — won't recycle twice. */
+  recycled: string[];
   /** Rotating nomination order (userIds). */
   nominationOrder: string[];
   /** Index into nominationOrder of the next/current nominator. */
@@ -116,9 +127,24 @@ export function nominateSeconds(settings: DraftSettings): number {
   return settings.pickSeconds;
 }
 
-/** Seconds the bidding stays open; resets on every fresh bid. */
+/** Seconds the bid clock runs on the open lot (a fixed countdown, not reset per bid). */
 export function bidSeconds(settings: DraftSettings): number {
-  return Math.max(6, Math.min(20, Math.round(settings.pickSeconds / 4)));
+  return Math.max(5, settings.bidSeconds || 20);
+}
+
+/** Anti-snipe window: a bid landing inside this re-extends the clock to it. */
+export function bidExtendSeconds(settings: DraftSettings): number {
+  return Math.max(2, settings.bidExtendSeconds || 7);
+}
+
+/** Lowest first bid that opens a lot — a fraction of the starting budget. */
+export function minOpeningBid(settings: DraftSettings): number {
+  return Math.max(1, Math.ceil(MIN_BID_PCT * settings.budget));
+}
+
+/** Minimum raise over the standing high bid — a fraction of the starting budget. */
+export function raiseStep(settings: DraftSettings): number {
+  return Math.max(1, Math.ceil(RAISE_STEP_PCT * settings.budget));
 }
 
 // ---- Derived helpers --------------------------------------------------------
@@ -210,21 +236,25 @@ export function createAuction(args: CreateAuctionArgs): AuctionState {
 
   const squadSize = roundsFor(settings, participants.length, poolTeamCount);
 
-  // Hybrid auctions only the top-ranked "marquee" nations; pure auctions open
-  // the whole board.
+  // The board is the rank-sorted pool capped at `boardSize` (decoupled from
+  // squad size). Hybrid auctions only the top `marqueeCount` of that board and
+  // free-fills the rest; pure auction puts the whole board on the block.
   const byRank = [...allTeamIds].sort(
     (a, b) => (ranking.rankOf(a) ?? Infinity) - (ranking.rankOf(b) ?? Infinity),
   );
-  const marquee = Math.max(1, Math.min(settings.marqueeCount, byRank.length));
-  const lotPool = style === "hybrid" ? byRank.slice(0, marquee) : byRank.slice();
+  const boardSize = Math.max(1, Math.min(settings.boardSize || byRank.length, byRank.length));
+  const board = byRank.slice(0, boardSize);
+  const marquee = Math.max(1, Math.min(settings.marqueeCount, board.length));
+  const lotPool = style === "hybrid" ? board.slice(0, marquee) : board.slice();
 
   return {
     settings,
     participants,
     style,
     squadSize,
-    boardTeamIds: byRank.slice(),
+    boardTeamIds: board.slice(),
     lotPool,
+    recycled: [],
     nominationOrder,
     nominationIndex: 0,
     current: null,
@@ -263,21 +293,30 @@ export function startAuction(
 
 // ---- Live transitions -------------------------------------------------------
 
-/** The minimum a fresh bid must beat (1 to open a lot). */
+/**
+ * The least a new bid may be right now:
+ *  - no lot open → 0 (nothing to bid on yet);
+ *  - lot open, no bids → the opening bid (≥10% of budget);
+ *  - lot open with a standing bid → high bid + the raise step (≥5% of budget).
+ */
 export function minNextBid(state: AuctionState): number {
-  return state.current ? state.current.highBid + 1 : 1;
+  if (!state.current) return 0;
+  if (state.current.highBidder === "") return minOpeningBid(state.settings);
+  return state.current.highBid + raiseStep(state.settings);
 }
 
-/** True when at least one manager still has both a slot and a spare credit. */
+/** True when at least one manager has a slot and can afford an opening bid. */
 function anyoneCanBid(state: AuctionState): boolean {
+  const open = minOpeningBid(state.settings);
   return state.participants.some(
-    (p) => !squadFull(state, p.userId) && maxBidFor(state, p.userId) >= 1,
+    (p) => !squadFull(state, p.userId) && maxBidFor(state, p.userId) >= open,
   );
 }
 
 /**
- * Put a nation on the block. The nominator opens the bidding at 1 credit, so a
- * nomination is also an implicit first bid.
+ * Put a nation on the block. The lot opens with no bid (highBid 0, highBidder
+ * ""); any manager — the nominator included — then bids, the first bid having to
+ * clear the opening minimum. The bid clock starts counting down immediately.
  */
 export function nominate(
   state: AuctionState,
@@ -291,10 +330,8 @@ export function nominate(
   if (nominator(state) !== userId) return state; // not this manager's turn
   if (squadFull(state, userId)) return state;
   if (!state.lotPool.includes(teamId)) return state; // not auctionable
-  const open = 1;
-  if (maxBidFor(state, userId) < open) return state; // can't even open
 
-  const lot: AuctionLot = { teamId, nominatedBy: userId, highBid: open, highBidder: userId };
+  const lot: AuctionLot = { teamId, nominatedBy: userId, highBid: 0, highBidder: "" };
   return {
     ...state,
     current: lot,
@@ -308,14 +345,17 @@ export function nominate(
         at: new Date(now).toISOString(),
         userId,
         teamId,
-        amount: open,
-        message: `${displayName(state, userId)} nominates ${teamName(opts, teamId)} — opening at ${open}`,
+        message: `${displayName(state, userId)} puts ${teamName(opts, teamId)} up for auction`,
       },
     ],
   };
 }
 
-/** Raise the leading bid on the open lot; resets the bid clock. */
+/**
+ * Raise the leading bid on the open lot. The bid clock is a fixed countdown, so
+ * a bid only touches `deadlineAt` when it lands inside the anti-snipe window —
+ * then the clock re-extends to `bidExtendSeconds` so nobody can snipe at 0.
+ */
 export function placeBid(
   state: AuctionState,
   userId: string,
@@ -326,14 +366,17 @@ export function placeBid(
   if (state.status !== "live") return state;
   if (!state.current) return state;
   if (squadFull(state, userId)) return state;
-  if (amount <= state.current.highBid) return state; // must beat the leader
+  if (amount < minNextBid(state)) return state; // below the opening/raise floor
   if (amount > maxBidFor(state, userId)) return state; // can't afford
 
   const lot: AuctionLot = { ...state.current, highBid: amount, highBidder: userId };
+  const extendMs = bidExtendSeconds(state.settings) * 1000;
+  const remaining = state.deadlineAt != null ? state.deadlineAt - now : 0;
+  const deadlineAt = remaining < extendMs ? now + extendMs : state.deadlineAt;
   return {
     ...state,
     current: lot,
-    deadlineAt: now + bidSeconds(state.settings) * 1000,
+    deadlineAt,
     lastActionAt: now,
     log: [
       ...state.log,
@@ -398,8 +441,54 @@ function sellCurrent(state: AuctionState, opts: AuctionOpts | undefined, now: nu
 }
 
 /**
- * Clock expiry. With a lot open it sells to the leader; otherwise the
- * nomination clock lapsed, so we auto-nominate (or skip) to keep things moving.
+ * A lot's clock ran out with no bids. First time, the nation goes back to the
+ * tail of the pool for one more chance; if it already had its second airing it's
+ * left unsold (the fill draft will hand it out for free at the end).
+ */
+function recycleCurrent(
+  state: AuctionState,
+  opts: AuctionOpts | undefined,
+  now: number,
+): AuctionState {
+  const lot = state.current;
+  if (!lot) return state;
+  const alreadyRecycled = state.recycled.includes(lot.teamId);
+
+  const after: AuctionState = {
+    ...state,
+    current: null,
+    lotPool: alreadyRecycled ? state.lotPool : [...state.lotPool, lot.teamId],
+    recycled: alreadyRecycled ? state.recycled : [...state.recycled, lot.teamId],
+    lastActionAt: now,
+    log: [
+      ...state.log,
+      {
+        kind: "recycle",
+        at: new Date(now).toISOString(),
+        teamId: lot.teamId,
+        message: alreadyRecycled
+          ? `No bids for ${teamName(opts, lot.teamId)} — it goes to the free fill draft`
+          : `No bids for ${teamName(opts, lot.teamId)} — back on the block later`,
+      },
+    ],
+  };
+
+  if (allSquadsFull(after) || after.lotPool.length === 0 || !anyoneCanBid(after)) {
+    return runFill(after, opts, now);
+  }
+  const idx = nextNominationIndex(after, (after.nominationIndex + 1) % after.nominationOrder.length);
+  if (idx < 0) return runFill(after, opts, now);
+  return {
+    ...after,
+    nominationIndex: idx,
+    deadlineAt: now + nominateSeconds(after.settings) * 1000,
+  };
+}
+
+/**
+ * Clock expiry. With a lot open it either sells to the leader or, if no bids
+ * landed, recycles the nation; otherwise the nomination clock lapsed, so we
+ * auto-nominate (or skip) to keep things moving.
  */
 export function expireAuction(
   state: AuctionState,
@@ -408,7 +497,11 @@ export function expireAuction(
 ): AuctionState {
   if (state.status !== "live") return state;
 
-  if (state.current) return sellCurrent(state, opts, now);
+  if (state.current) {
+    return state.current.highBidder === ""
+      ? recycleCurrent(state, opts, now)
+      : sellCurrent(state, opts, now);
+  }
 
   // Nomination clock lapsed.
   if (state.lotPool.length === 0 || !anyoneCanBid(state)) return runFill(state, opts, now);
@@ -444,13 +537,17 @@ export function runFill(state: AuctionState, opts?: AuctionOpts, now = Date.now(
   const owned: Record<string, number> = {};
   for (const p of state.participants) owned[p.userId] = ownedCount(state, p.userId);
 
+  // Snake the hand-outs (forward, then reversed, …) so the best leftovers don't
+  // always land with the same player — the luck evens out across passes.
   const wins = state.wins.slice();
   const log = state.log.slice();
   let avIdx = 0;
   let progressed = true;
+  let pass = 0;
   while (progressed && avIdx < available.length) {
     progressed = false;
-    for (const p of state.participants) {
+    const lane = pass % 2 === 1 ? [...state.participants].reverse() : state.participants;
+    for (const p of lane) {
       if (owned[p.userId] >= state.squadSize) continue;
       if (avIdx >= available.length) break;
       const teamId = available[avIdx++];
@@ -472,6 +569,7 @@ export function runFill(state: AuctionState, opts?: AuctionOpts, now = Date.now(
       });
       progressed = true;
     }
+    pass++;
   }
 
   return {
@@ -550,7 +648,7 @@ export function nextBotBid(
   if (!state.current) return null;
   if (squadFull(state, userId)) return null;
   if (state.current.highBidder === userId) return null; // already leading
-  const next = state.current.highBid + 1;
+  const next = minNextBid(state); // opening floor, or high bid + raise step
   if (next > maxBidFor(state, userId)) return null;
   if (next > botCeilingFor(state, userId, state.current.teamId, ranking)) return null;
   return next;
@@ -558,7 +656,7 @@ export function nextBotBid(
 
 /** The nation a bot would nominate on its turn (best available it can open). */
 export function nextBotNomination(state: AuctionState, userId: string): string | null {
-  if (maxBidFor(state, userId) < 1) return null;
+  if (maxBidFor(state, userId) < minOpeningBid(state.settings)) return null;
   return state.lotPool[0] ?? null; // lotPool stays rank-sorted, best first
 }
 

@@ -28,6 +28,7 @@ import {
   nominator,
   pauseAuction,
   placeBid,
+  raiseStep,
   resumeAuction,
   slotsRemaining,
   squadFull,
@@ -169,6 +170,11 @@ export function useAuction(opts: UseAuctionOptions) {
   const myMaxBid = maxBidFor(state, currentUserId);
   const mySlotsLeft = slotsRemaining(state, currentUserId);
   const nextBid = minNextBid(state);
+  const bidStep = raiseStep(state.settings);
+  // Lot leader: highBid is 0 / winningUserId "" until the first bid lands.
+  const currentHigh = state.current?.highBid ?? 0;
+  const winningUserId = state.current?.highBidder || null;
+  const iAmWinning = winningUserId === currentUserId && winningUserId != null;
   const canIBid =
     state.current != null &&
     state.current.highBidder !== currentUserId &&
@@ -198,6 +204,10 @@ export function useAuction(opts: UseAuctionOptions) {
     myMaxBid,
     mySlotsLeft,
     nextBid,
+    bidStep,
+    currentHigh,
+    winningUserId,
+    iAmWinning,
     canIBid,
     actions: { start, nominateTeam, bid, pause, resume, cancel },
   };

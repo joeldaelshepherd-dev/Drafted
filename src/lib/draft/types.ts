@@ -6,14 +6,34 @@
  * driven by an offline timer hook, or replayed from Supabase Realtime events.
  */
 
-export type DraftFormat = "snake" | "standard";
+export type DraftFormat = "snake" | "standard" | "balanced-random";
 
 export type DraftStatus = "configuring" | "lobby" | "live" | "paused" | "complete" | "cancelled";
 
 export type DraftOrderMode = "random" | "manual";
 
-/** How teams are allocated across participants. */
+/**
+ * How teams are allocated across participants.
+ * Legacy field kept only so the one-time settings migration can map old configs.
+ */
 export type AllocationMode = "all" | "fixed";
+
+/**
+ * How many nations each manager ends up with:
+ *  - "fixed"     → exactly `teamsPerUser` each.
+ *  - "split-all" → divide the whole board (boardSize) evenly.
+ *  - "split-top" → divide the top `boardSize` nations evenly (same maths,
+ *    different framing for the user — "only the best nations are in play").
+ */
+export type SquadMode = "fixed" | "split-all" | "split-top";
+
+/** Rounds 2+ pattern when round 1 is a hand-picked manual order. */
+export type SubsequentFormat = "snake" | "standard" | "random";
+
+/** Opening bid floor as a fraction of the starting budget. */
+export const MIN_BID_PCT = 0.1;
+/** Minimum raise over the standing high bid, as a fraction of the starting budget. */
+export const RAISE_STEP_PCT = 0.05;
 
 /**
  * How squads are filled:
@@ -31,12 +51,31 @@ export interface DraftSettings {
   /** Hybrid only: how many top-ranked nations go to auction before the draft fills the rest. */
   marqueeCount: number;
   format: DraftFormat;
-  /** Seconds on the clock per pick. */
+  /** Seconds on the clock per pick (also the nomination clock for auctions). */
   pickSeconds: number;
+  /**
+   * Legacy allocation flag — superseded by `squadMode`. Kept so the one-time
+   * settings migration can read old configs; new code should read `squadMode`.
+   */
   allocationMode: AllocationMode;
-  /** When allocationMode === "fixed", teams each participant drafts. */
+  /** How squads are sized: fixed count, split the whole board, or split the top board. */
+  squadMode: SquadMode;
+  /**
+   * Nations on the board / auction block — fully decoupled from `teamsPerUser`.
+   * Presets: 48 (all), 24 (top 2 per group), 20, 15, 10.
+   */
+  boardSize: number;
+  /** When squadMode === "fixed", nations each participant ends up with. */
   teamsPerUser: number;
   orderMode: DraftOrderMode;
+  /** Hand-picked round-1 order (userIds) when orderMode === "manual". */
+  manualFirstRoundOrder?: string[];
+  /** Rounds 2+ pattern when round 1 is a manual order. */
+  subsequentFormat: SubsequentFormat;
+  /** Seconds the bid clock runs on the open lot (auction / hybrid). */
+  bidSeconds: number;
+  /** Anti-snipe: a late bid inside this window re-extends the clock to it. */
+  bidExtendSeconds: number;
   /** Auto-draft the best queued/available team when the clock expires. */
   autoPick: boolean;
   // Optional experience toggles (admin-configurable).

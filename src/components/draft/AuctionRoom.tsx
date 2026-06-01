@@ -16,6 +16,7 @@ import {
   squadBadges,
 } from "@/lib/draft/projection";
 import { DraftTimer } from "./DraftTimer";
+import { BidPanel } from "./BidPanel";
 import { PostDraftAnalysis } from "./PostDraftAnalysis";
 
 const TEAMS_BY_ID = new Map<string, WorldCupTeam>(WC2026_TEAMS.map((t) => [t.id, t]));
@@ -27,6 +28,7 @@ const KIND_MARK: Record<AuctionLogKind, string> = {
   nominate: "📣",
   bid: "💸",
   sold: "🔨",
+  recycle: "♻️",
   fill: "🎁",
   paused: "⏸",
   resumed: "▶",
@@ -49,7 +51,19 @@ export function AuctionRoom({
   poolName: string;
 }) {
   const auction = useAuction({ initial: initialState, ranking: fifaRanking, nameOf, currentUserId });
-  const { state, clock, isMyNomination, myBudget, myMaxBid, nextBid, canIBid, actions } = auction;
+  const {
+    state,
+    clock,
+    isMyNomination,
+    myBudget,
+    myMaxBid,
+    nextBid,
+    bidStep,
+    winningUserId,
+    iAmWinning,
+    canIBid,
+    actions,
+  } = auction;
 
   const [confirmCancel, setConfirmCancel] = useState(false);
 
@@ -166,10 +180,7 @@ export function AuctionRoom({
     .filter((t): t is WorldCupTeam => !!t)
     .slice(0, 12);
 
-  // A couple of quick over-bid amounts, all capped at what the viewer can spend.
-  const quickBids = Array.from(new Set([nextBid, nextBid + 4, nextBid + 9]))
-    .filter((amt) => amt <= myMaxBid)
-    .slice(0, 3);
+  const lotRecycled = !!lot && state.recycled.includes(lot.teamId);
 
   return (
     <div className="relative flex flex-col gap-4">
@@ -236,39 +247,18 @@ export function AuctionRoom({
             {/* Bid controls */}
             {lot && (
               <div className="mt-5">
-                {canIBid ? (
-                  <div className="flex flex-wrap gap-2">
-                    {quickBids.map((amt, i) => (
-                      <Button
-                        key={amt}
-                        variant={i === 0 ? "primary" : "secondary"}
-                        size="lg"
-                        className="flex-1"
-                        onClick={() => actions.bid(amt)}
-                      >
-                        Bid {amt}
-                      </Button>
-                    ))}
-                    {myMaxBid > nextBid && (
-                      <Button
-                        variant="secondary"
-                        size="lg"
-                        className="flex-1"
-                        onClick={() => actions.bid(myMaxBid)}
-                      >
-                        Max ({myMaxBid})
-                      </Button>
-                    )}
-                  </div>
-                ) : (
-                  <p className="rounded-xl bg-white/5 px-3 py-2 text-center text-sm text-ink-faint">
-                    {lot.highBidder === currentUserId
-                      ? "You're the high bidder — sit tight."
-                      : nextBid > myMaxBid
-                        ? "You can't outbid this without breaking your reserve."
-                        : "Bidding…"}
-                  </p>
-                )}
+                <BidPanel
+                  team={lotTeam}
+                  canIBid={canIBid}
+                  nextBid={nextBid}
+                  bidStep={bidStep}
+                  myMaxBid={myMaxBid}
+                  budget={myBudget}
+                  isWinning={iAmWinning}
+                  isRecycled={lotRecycled}
+                  highBidderName={winningUserId ? nameFor(winningUserId) : null}
+                  onBid={(amt) => actions.bid(amt)}
+                />
               </div>
             )}
 

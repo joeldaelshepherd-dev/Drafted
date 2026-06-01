@@ -5,7 +5,8 @@ import Link from "next/link";
 import { Button } from "@/components/ui";
 import { usePools } from "@/lib/pools/store";
 import { useProfile } from "@/lib/profile/store";
-import { useDraftConfig, DEFAULT_DRAFT_SETTINGS } from "@/lib/draft/config-store";
+import { DEFAULT_DRAFT_SETTINGS } from "@/lib/draft/config-store";
+import { useDraftRecord } from "@/lib/draft/drafts-store";
 import { createDraft } from "@/lib/draft/lifecycle";
 import { createAuction } from "@/lib/draft/auction";
 import { DEMO_DRAFT_USER } from "@/lib/draft/demo";
@@ -26,17 +27,17 @@ type RoomState =
  * "draft" → DraftRoom, "auction"/"hybrid" → AuctionRoom. Production swap:
  * replace this localStorage hydration with a Supabase read + Realtime sub.
  */
-export function DraftRoomLoader({ poolId }: { poolId: string }) {
+export function DraftRoomLoader({ poolId, draftId }: { poolId: string; draftId: string }) {
   const { pools, loading: poolsLoading } = usePools();
   const { profile, loading: profileLoading } = useProfile();
-  const { settings, loading: configLoading } = useDraftConfig(poolId);
+  const { draft, loading: draftLoading } = useDraftRecord(draftId);
 
   const pool = pools.find((p) => p.id === poolId);
-  const loading = poolsLoading || profileLoading || configLoading;
+  const loading = poolsLoading || profileLoading || draftLoading;
 
   const room = useMemo<RoomState | null>(() => {
     if (loading || !pool) return null;
-    const cfg = settings ?? DEFAULT_DRAFT_SETTINGS;
+    const cfg = draft?.settings ?? DEFAULT_DRAFT_SETTINGS;
     const participants: DraftParticipant[] = pool.members.map((m) => ({
       userId: m.id,
       name: m.name,
@@ -63,7 +64,7 @@ export function DraftRoomLoader({ poolId }: { poolId: string }) {
         poolTeamCount: WC2026_TEAMS.length,
       }),
     };
-  }, [loading, pool, settings]);
+  }, [loading, pool, draft]);
 
   if (loading) {
     return (

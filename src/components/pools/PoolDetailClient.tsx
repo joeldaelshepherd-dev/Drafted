@@ -5,7 +5,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Button, Card } from "@/components/ui";
 import { usePools } from "@/lib/pools/store";
-import type { DraftStatus } from "@/lib/pools/types";
+import {
+  cancelDraftRecord,
+  createDraftRecord,
+  useDraftsForPool,
+  type DraftRecordStatus,
+} from "@/lib/draft/drafts-store";
 import { cn, initials } from "@/lib/utils";
 
 /**
@@ -13,12 +18,6 @@ import { cn, initials } from "@/lib/utils";
  * an honest tournament-start countdown; swap for the live schedule once wired.
  */
 const TOURNAMENT_KICKOFF = "2026-06-11T18:00:00";
-
-const DRAFT_BADGE: Record<DraftStatus, { label: string; className: string }> = {
-  not_started: { label: "Draft to come", className: "bg-gold/15 text-gold" },
-  in_progress: { label: "Draft live", className: "bg-loss/20 text-loss" },
-  complete: { label: "Drafted", className: "bg-brand/15 text-brand" },
-};
 
 function remaining(target: number) {
   const ms = Math.max(0, target - Date.now());
@@ -95,12 +94,29 @@ function CopyButton({ label, value }: { label: string; value: string }) {
   );
 }
 
+const DRAFT_ROW_BADGE: Record<DraftRecordStatus, { label: string; className: string }> = {
+  configuring: { label: "Setting up", className: "bg-gold/15 text-gold" },
+  in_progress: { label: "Live", className: "bg-loss/20 text-loss" },
+  complete: { label: "Drafted", className: "bg-brand/15 text-brand" },
+  cancelled: { label: "Cancelled", className: "bg-ink/10 text-ink-faint" },
+};
+
 export function PoolDetailClient({ poolId }: { poolId: string }) {
   const router = useRouter();
   const { pools, loading } = usePools();
+  const { drafts, loading: draftsLoading } = useDraftsForPool(poolId);
   const [inviteUrl, setInviteUrl] = useState("");
 
   const pool = pools.find((p) => p.id === poolId);
+
+  const handleCreateDraft = () => {
+    const record = createDraftRecord(poolId);
+    router.push(`/pools/${poolId}/draft/${record.id}/setup`);
+  };
+
+  const handleCancelDraft = (draftId: string) => {
+    cancelDraftRecord(draftId);
+  };
 
   useEffect(() => {
     if (pool) {
@@ -142,16 +158,22 @@ export function PoolDetailClient({ poolId }: { poolId: string }) {
     );
   }
 
-  const badge = DRAFT_BADGE[pool.draftStatus];
+  const activeDrafts = drafts.filter((d) => d.status !== "cancelled");
+  const summary: { label: string; className: string } = activeDrafts.some(
+    (d) => d.status === "in_progress",
+  )
+    ? { label: "Draft live", className: "bg-loss/20 text-loss" }
+    : activeDrafts.some((d) => d.status === "complete")
+      ? { label: "Drafted", className: "bg-brand/15 text-brand" }
+      : activeDrafts.some((d) => d.status === "configuring")
+        ? { label: "Draft setup", className: "bg-gold/15 text-gold" }
+        : { label: "No drafts yet", className: "bg-gold/15 text-gold" };
+
   const shareText = `Join my "${pool.name}" pool on Drafted for the FIFA World Cup 2026! Use code ${pool.inviteCode} or tap: ${inviteUrl}`;
   const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
   const emailUrl = `mailto:?subject=${encodeURIComponent(
     `Join my Drafted pool: ${pool.name}`,
   )}&body=${encodeURIComponent(shareText)}`;
-
-  const handleStartDraft = () => {
-    router.push(`/pools/${pool.id}/draft/setup`);
-  };
 
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col gap-6 px-5 py-8">
@@ -169,7 +191,7 @@ export function PoolDetailClient({ poolId }: { poolId: string }) {
             {pool.isAdmin ? " · You're admin" : ""}
           </p>
         </div>
-        <span className={cn("pill shrink-0", badge.className)}>{badge.label}</span>
+        <span className={cn("pill shrink-0", summary.className)}>{summary.label}</span>
       </header>
 
       {/* Countdown to first match */}
@@ -248,39 +270,124 @@ export function PoolDetailClient({ poolId }: { poolId: string }) {
         </Card>
       </section>
 
-      {/* Draft controls + quick links */}
+      {/* Drafts — a pool can run several at once */}
       <section className="flex flex-col gap-3">
-        <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">The draft</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-bold uppercase tracking-wide text-ink-muted">
+            Drafts ({activeDrafts.length})
+          </h2>
+          {pool.isAdmin && (
+            <Button size="sm" className="justify-center" onClick={handleCreateDraft}>
+              + New draft
+            </Button>
+          )}
+        </div>
 
-        {pool.draftStatus === "not_started" &&
-          (pool.isAdmin ? (
-            <Card className="flex flex-col gap-3">
-              <p className="text-sm text-ink-muted">
-                When your managers are in, set the format, clock and squad size — then launch into
-                the pre-draft lobby.
-              </p>
-              <Button className="w-full justify-center" onClick={handleStartDraft}>
-                Set up the draft
+        {draftsLoading ? (
+          <div className="skeleton h-20 w-full rounded-2xl" />
+        ) : drafts.length === 0 ? (
+          <Card className="flex flex-col gap-3">
+            <p className="text-sm text-ink-muted">
+              {pool.isAdmin
+                ? "No drafts yet. Spin one up, set the format, clock and squad size, then launch into the pre-draft lobby."
+                : "No drafts yet. Waiting for the admin to set one up — you'll be notified when it's live."}
+            </p>
+            {pool.isAdmin && (
+              <Button className="w-full justify-center" onClick={handleCreateDraft}>
+                Set up a draft
               </Button>
-            </Card>
-          ) : (
-            <Card className="text-sm text-ink-muted">
-              Waiting for the admin to start the draft. You&apos;ll be notified when it&apos;s live.
-            </Card>
-          ))}
+            )}
+          </Card>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {drafts.map((d) => {
+              const rowBadge = DRAFT_ROW_BADGE[d.status];
+              return (
+                <Card key={d.id} className="flex flex-col gap-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold text-ink">{d.name}</p>
+                      <p className="text-[11px] text-ink-faint">
+                        {d.settings.style === "auction"
+                          ? "Auction"
+                          : d.settings.style === "hybrid"
+                            ? "Hybrid auction"
+                            : d.settings.format === "snake"
+                              ? "Snake draft"
+                              : d.settings.format === "balanced-random"
+                                ? "Balanced random draft"
+                                : "Standard draft"}
+                      </p>
+                    </div>
+                    <span className={cn("pill shrink-0", rowBadge.className)}>{rowBadge.label}</span>
+                  </div>
 
-        {pool.draftStatus === "in_progress" && (
-          <Link href={`/pools/${pool.id}/draft`}>
-            <Button className="w-full justify-center">Enter the draft room</Button>
-          </Link>
+                  <div className="grid grid-cols-2 gap-2">
+                    {d.status === "configuring" && (
+                      <>
+                        <Link href={`/pools/${pool.id}/draft/${d.id}/setup`}>
+                          <Button size="sm" className="w-full justify-center">
+                            {pool.isAdmin ? "Edit setup" : "View setup"}
+                          </Button>
+                        </Link>
+                        {pool.isAdmin && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="w-full justify-center"
+                            onClick={() => handleCancelDraft(d.id)}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </>
+                    )}
+
+                    {d.status === "in_progress" && (
+                      <>
+                        <Link href={`/pools/${pool.id}/draft/${d.id}`}>
+                          <Button size="sm" className="w-full justify-center">
+                            Enter room
+                          </Button>
+                        </Link>
+                        {pool.isAdmin && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="w-full justify-center"
+                            onClick={() => handleCancelDraft(d.id)}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </>
+                    )}
+
+                    {d.status === "complete" && (
+                      <Link href={`/pools/${pool.id}/my-teams`} className="col-span-2">
+                        <Button size="sm" className="w-full justify-center">
+                          View results
+                        </Button>
+                      </Link>
+                    )}
+
+                    {d.status === "cancelled" && pool.isAdmin && (
+                      <Link href={`/pools/${pool.id}/draft/${d.id}/setup`} className="col-span-2">
+                        <Button variant="secondary" size="sm" className="w-full justify-center">
+                          Reopen setup
+                        </Button>
+                      </Link>
+                    )}
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
         )}
+      </section>
 
-        {pool.draftStatus === "complete" && (
-          <Link href={`/pools/${pool.id}/my-teams`}>
-            <Button className="w-full justify-center">View your squad</Button>
-          </Link>
-        )}
-
+      {/* Quick links */}
+      <section className="flex flex-col gap-3">
         <div className="grid grid-cols-2 gap-2">
           <Link href={`/pools/${pool.id}/my-teams`}>
             <Button variant="secondary" size="sm" className="w-full justify-center">
