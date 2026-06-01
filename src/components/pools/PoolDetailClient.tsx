@@ -97,7 +97,7 @@ function CopyButton({ label, value }: { label: string; value: string }) {
 
 export function PoolDetailClient({ poolId }: { poolId: string }) {
   const router = useRouter();
-  const { pools, loading, startDraft } = usePools();
+  const { pools, loading } = usePools();
   const [inviteUrl, setInviteUrl] = useState("");
 
   const pool = pools.find((p) => p.id === poolId);
@@ -150,8 +150,7 @@ export function PoolDetailClient({ poolId }: { poolId: string }) {
   )}&body=${encodeURIComponent(shareText)}`;
 
   const handleStartDraft = () => {
-    startDraft(pool.id);
-    router.push(`/pools/${pool.id}/draft`);
+    router.push(`/pools/${pool.id}/draft/setup`);
   };
 
   return (
@@ -257,11 +256,11 @@ export function PoolDetailClient({ poolId }: { poolId: string }) {
           (pool.isAdmin ? (
             <Card className="flex flex-col gap-3">
               <p className="text-sm text-ink-muted">
-                When your managers are in, kick things off. You can set the format on the next
-                screen.
+                When your managers are in, set the format, clock and squad size — then launch into
+                the pre-draft lobby.
               </p>
               <Button className="w-full justify-center" onClick={handleStartDraft}>
-                Start the draft
+                Set up the draft
               </Button>
             </Card>
           ) : (
