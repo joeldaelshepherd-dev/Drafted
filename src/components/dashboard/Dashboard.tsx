@@ -23,7 +23,12 @@ function PoolCard({ pool }: { pool: Pool }) {
     <Card className="flex flex-col gap-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-lg font-black text-ink">{pool.name}</p>
+          <Link
+            href={`/pools/${pool.id}`}
+            className="block truncate text-lg font-black text-ink hover:text-brand"
+          >
+            {pool.name}
+          </Link>
           <p className="text-xs text-ink-muted">
             {pool.tournamentName} · {pool.members.length}{" "}
             {pool.members.length === 1 ? "manager" : "managers"}

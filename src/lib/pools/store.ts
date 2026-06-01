@@ -132,14 +132,28 @@ export function usePools() {
       const pool = current.find((p) => p.inviteCode.toUpperCase() === target);
       if (!pool) return null;
       if (!pool.members.some((m) => m.id === member.id)) {
-        pool.members = [...pool.members, member];
-        persist(current);
-        setPools(current);
+        const next = current.map((p) =>
+          p.id === pool.id ? { ...p, members: [...p.members, member] } : p,
+        );
+        persist(next);
+        setPools(next);
+        return next.find((p) => p.id === pool.id) ?? pool;
       }
       return pool;
     },
     [],
   );
 
-  return { pools, loading, createPool, joinByCode };
+  /** Admin-only: move a pool from not_started → in_progress. */
+  const startDraft = useCallback((poolId: string) => {
+    const next = readPools().map((p) =>
+      p.id === poolId && p.isAdmin && p.draftStatus === "not_started"
+        ? { ...p, draftStatus: "in_progress" as const }
+        : p,
+    );
+    persist(next);
+    setPools(next);
+  }, []);
+
+  return { pools, loading, createPool, joinByCode, startDraft };
 }
