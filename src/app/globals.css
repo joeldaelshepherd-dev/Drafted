@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design tokens ────────────────────────────────────────────────────────
+   Dark by default. Values are RGB triples so Tailwind's <alpha-value> works.
+   A future tournament "skin" can override --brand/--gold at the :root scope. */
+:root {
+  --bg: 8 10 16;            /* near-black navy */
+  --bg-elevated: 14 17 26;
+  --surface: 20 24 36;
+  --border: 38 44 60;
+
+  --ink: 237 240 247;
+  --ink-muted: 156 163 184;
+  --ink-faint: 99 106 128;
+
+  --brand: 34 211 138;      /* electric pitch green */
+  --brand-dark: 16 122 80;
+  --gold: 245 197 66;       /* trophy gold */
+  --win: 52 211 153;
+  --loss: 248 113 113;
+  --live: 244 63 94;        /* live rose */
+
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-display: "Inter", system-ui, sans-serif;
+}
+
+* { -webkit-tap-highlight-color: transparent; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background:
+    radial-gradient(1200px 600px at 50% -10%, rgb(var(--brand) / 0.08), transparent 60%),
+    rgb(var(--bg));
+  color: rgb(var(--ink));
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100dvh;
+}
+
+/* ── Reusable component classes ──────────────────────────────────────────── */
+@layer components {
+  /* Glassmorphism card */
+  .glass {
+    @apply rounded-2xl border border-white/10 bg-white/[0.04] shadow-glass backdrop-blur-xl;
+  }
+
+  /* Large, one-handed friendly tap target */
+  .tap {
+    @apply min-h-[52px] select-none active:scale-[0.98] transition-transform;
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold;
+  }
+
+  /* Live indicator dot */
+  .live-dot {
+    @apply inline-block h-2 w-2 rounded-full bg-live animate-pulse-live;
+  }
+
+  /* Shimmer skeleton */
+  .skeleton {
+    @apply relative overflow-hidden rounded-lg bg-white/5;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer
+      bg-gradient-to-r from-transparent via-white/10 to-transparent content-[''];
+  }
+}
+
+/* Hide scrollbars on horizontal tickers/story rails */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

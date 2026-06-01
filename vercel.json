@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/sync/football?secret=$SYNC_CRON_SECRET",
+      "schedule": "0 3 * * *"
+    }
+  ]
+}
